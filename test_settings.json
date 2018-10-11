@@ -156,5 +156,10 @@
         "delete_local_zip": true,
         "debug": true,
         "architecture": "invalid_architecture"
-     }
+     },
+    "schedule_async_resources_sqs": {
+      "keep_warm": false,
+      "async_source": "sqs",
+      "async_resources": true
+    }
 }

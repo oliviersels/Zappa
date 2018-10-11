@@ -2,6 +2,7 @@ import os
 import unittest
 
 import boto3
+import json
 import mock
 
 try:
@@ -13,6 +14,7 @@ from zappa.asynchronous import (
     AsyncException,
     LambdaAsyncResponse,
     SnsAsyncResponse,
+    SqsAsyncResponse,
     get_func_task_path,
     import_and_get_task,
 )
@@ -52,6 +54,7 @@ class TestZappa(unittest.TestCase):
         l = LambdaAsyncResponse(boto_session=boto_session)
         # s = SnsAsyncResponse()
         s = SnsAsyncResponse(arn="arn:abc:def", boto_session=boto_session)
+        q = SqsAsyncResponse(queue_url="https://example.com", boto_session=boto_session)
 
     def test_nofails_funcs(self):
         funk = import_and_get_task("tests.test_app.async_me")
@@ -90,6 +93,7 @@ class TestZappa(unittest.TestCase):
         lambda_async_mock.assert_called_with(
             aws_region="us-east-1",
             capture_response=False,
+            delay_seconds=0,
             lambda_function_name="MyLambda",
         )
         lambda_async_mock.return_value.send.assert_called_with(get_func_task_path(async_me), ("qux",), {})
@@ -100,3 +104,55 @@ class TestZappa(unittest.TestCase):
         unserializable_object = object()
         with self.assertRaises(UnserializableJsonError):
             async_me(unserializable_object)
+
+    def test_async_sqs_call(self):
+        """
+        Call a task with sqs async service.
+        """
+
+        async_sqs_me = import_and_get_task("tests.test_app.async_sqs_me")
+        sqs_client_mock = mock.Mock()
+        sqs_client_mock.get_queue_url = mock.MagicMock(
+            return_value={"QueueUrl": "https://us-east-1.queue.amazonaws.com/1"}
+        )
+        sqs_client_mock.send_message = mock.MagicMock(
+            return_value={
+                "MD5OfMessageBody": "string",
+                "MD5OfMessageAttributes": "string",
+                "MessageId": "1234",
+                "SequenceNumber": "1",
+            }
+        )
+        with mock.patch("zappa.asynchronous.SQS_CLIENT", sqs_client_mock, create=True):
+            # First check that it still runs synchronously by default
+            self.assertEqual(
+                async_sqs_me("123"), "run async with sqs service when on lambda 123"
+            )
+
+            # Now patch the environment to make it look like we are running on
+            # AWS Lambda
+            options = {
+                "AWS_LAMBDA_FUNCTION_NAME": "MyLambda",
+                "AWS_REGION": "us-east-1",
+            }
+            with mock.patch.dict(os.environ, options):
+                async_sqs_me("qux")
+
+        # And check the sqs client got invoked correctly
+        sqs_client_mock.get_queue_url.assert_called_once_with(
+            QueueName="MyLambda-zappa-async"
+        )
+        sqs_client_mock.send_message.assert_called_once_with(
+            QueueUrl="https://us-east-1.queue.amazonaws.com/1",
+            MessageBody=json.dumps(
+                {
+                    "task_path": get_func_task_path(async_sqs_me),
+                    "capture_response": False,
+                    "response_id": None,
+                    "args": ["qux"],
+                    "kwargs": {},
+                    "zappaAsyncCommand": "zappa.asynchronous.route_sqs_task",
+                }
+            ),
+            DelaySeconds=0,
+        )
