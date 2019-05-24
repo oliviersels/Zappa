@@ -177,19 +177,28 @@ def common_log(environ, response, response_time=None):
 
     logger = logging.getLogger()
 
+    try:
+        status_code = response.status_code
+    except AttributeError:
+        status_code = response.get('statusCode', 0)
+    try:
+        content = response.content
+    except AttributeError:
+        content = response.get('body', '')
+
     if response_time:
         formatter = ApacheFormatter(with_response_time=True)
         try:
-            log_entry = formatter(response.status_code, environ,
-                                  len(response.content), rt_us=response_time)
+            log_entry = formatter(status_code, environ,
+                                  len(content), rt_us=response_time)
         except TypeError:
             # Upstream introduced a very annoying breaking change on the rt_ms/rt_us kwarg.
-            log_entry = formatter(response.status_code, environ,
-                                  len(response.content), rt_ms=response_time)
+            log_entry = formatter(status_code, environ,
+                                  len(content), rt_ms=response_time)
     else:
         formatter = ApacheFormatter(with_response_time=False)
-        log_entry = formatter(response.status_code, environ,
-                              len(response.content))
+        log_entry = formatter(status_code, environ,
+                              len(content))
 
     logger.info(log_entry)
 

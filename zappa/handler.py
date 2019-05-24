@@ -18,6 +18,8 @@ from werkzeug.wrappers import Response
 
 # This file may be copied into a project's root,
 # so handle both scenarios.
+from zappa.asgi import ZappaASGIServer
+
 try:
     from zappa.middleware import ZappaWSGIMiddleware
     from zappa.wsgi import create_wsgi_request, common_log
@@ -48,7 +50,10 @@ class LambdaHandler(object):
 
     # Application
     app_module = None
-    wsgi_app = None
+    asgi_app_module = None
+    http_app = None
+    http_mode = 'wsgi'
+    websockets_app = None
     trailing_slash = False
 
     def __new__(cls, settings_name="zappa_settings", session=None):
@@ -118,40 +123,65 @@ class LambdaHandler(object):
                 except ImportError:
                     print ("Failed to import cytpes library")
 
-            # This is a non-WSGI application
-            # https://github.com/Miserlou/Zappa/pull/748
-            if not hasattr(self.settings, 'APP_MODULE') and not self.settings.DJANGO_SETTINGS:
-                self.app_module = None
-                wsgi_app_function = None
-            # This is probably a normal WSGI app (Or django with overloaded wsgi application)
-            # https://github.com/Miserlou/Zappa/issues/1164
-            elif hasattr(self.settings, 'APP_MODULE'):
-                if self.settings.DJANGO_SETTINGS:
-                    sys.path.append('/var/task')
-                    from django.conf import ENVIRONMENT_VARIABLE as SETTINGS_ENVIRONMENT_VARIABLE
-                    # add the Lambda root path into the sys.path
-                    self.trailing_slash = True
-                    os.environ[SETTINGS_ENVIRONMENT_VARIABLE] = self.settings.DJANGO_SETTINGS
-                else:
-                    self.trailing_slash = False
-
-                # The app module
-                self.app_module = importlib.import_module(self.settings.APP_MODULE)
-
-                # The application
-                wsgi_app_function = getattr(self.app_module, self.settings.APP_FUNCTION)
-            # Django gets special treatment.
-            else:
-                try:  # Support both for tests
-                    from zappa.ext.django_zappa import get_django_wsgi
-                except ImportError:  # pragma: no cover
-                    from django_zappa_app import get_django_wsgi
-
-                # Get the Django WSGI app from our extension
-                wsgi_app_function = get_django_wsgi(self.settings.DJANGO_SETTINGS)
+            # Special treatment for django
+            if self.settings.DJANGO_SETTINGS:
+                # add the Lambda root path into the sys.path
+                sys.path.append('/var/task')
                 self.trailing_slash = True
+                from django.conf import ENVIRONMENT_VARIABLE as SETTINGS_ENVIRONMENT_VARIABLE
+                os.environ[SETTINGS_ENVIRONMENT_VARIABLE] = self.settings.DJANGO_SETTINGS
 
-            self.wsgi_app = ZappaWSGIMiddleware(wsgi_app_function)
+            if not hasattr(self.settings, 'ASGI_APP_MODULE') or self.settings.ASGI_MODE == 'websockets':
+                # This is probably a normal WSGI app (Or django with overloaded wsgi application)
+                # https://github.com/Miserlou/Zappa/issues/1164
+                wsgi_app_function = None
+                if hasattr(self.settings, 'APP_MODULE'):
+                    # The app module
+                    self.app_module = importlib.import_module(self.settings.APP_MODULE)
+                    # The application
+                    wsgi_app_function = getattr(self.app_module, self.settings.APP_FUNCTION)
+                # Django gets special treatment.
+                elif self.settings.DJANGO_SETTINGS:
+                    try:  # Support both for tests
+                        from zappa.ext.django_zappa import get_django_wsgi
+                    except ImportError:  # pragma: no cover
+                        from django_zappa_app import get_django_wsgi
+
+                    # Get the Django WSGI app from our extension
+                    wsgi_app_function = get_django_wsgi(self.settings.DJANGO_SETTINGS)
+
+                if wsgi_app_function:
+                    self.http_app = ZappaWSGIMiddleware(wsgi_app_function)
+
+            asgi_app_function = None
+            if hasattr(self.settings, 'ASGI_APP_MODULE'):
+                # The app module
+                self.asgi_app_module = importlib.import_module(self.settings.ASGI_APP_MODULE)
+                # The application
+                asgi_app_function = getattr(self.asgi_app_module, self.settings.ASGI_APP_FUNCTION)
+            elif self.settings.DJANGO_SETTINGS:
+                # Try to import django channels and get asgi app that way
+                try:
+                    from channels.routing import get_default_application
+                except ImportError:
+                    pass
+                else:
+                    try:  # Support both for tests
+                        from zappa.ext.django_zappa import get_django_asgi
+                    except ImportError:  # pragma: no cover
+                        from django_zappa_app import get_django_asgi
+                    asgi_app_function = get_django_asgi(self.settings.DJANGO_SETTINGS)
+            if asgi_app_function:
+                self.websockets_app = asgi_app_function
+                if self.settings.ASGI_MODE == 'full':
+                    self.http_mode = 'asgi'
+                    self.http_app = self.websockets_app
+
+            # Load backend
+            if getattr(self.settings, 'ASGI_APP_BACKEND', None):
+                ZappaASGIServer.application_instance_backend = self.import_module_and_get_function(self.settings.ASGI_APP_BACKEND)()
+            else:
+                ZappaASGIServer.application_instance_backend = None
 
     def load_remote_project_archive(self, project_zip_path):
         """
@@ -412,6 +442,7 @@ class LambdaHandler(object):
             # Get the Django WSGI app from our extension
             # We don't actually need the function,
             # but we do need to do all of the required setup for it.
+            sys.path.append('/var/task')
             app_function = get_django_wsgi(self.settings.DJANGO_SETTINGS)
 
             # Couldn't figure out how to get the value into stdout with StringIO..
@@ -469,112 +500,139 @@ class LambdaHandler(object):
                 logger.error("Cannot find a function to handle cognito trigger {}".format(triggerSource))
             return result
 
-        # Normal web app flow
-        try:
-            # Timing
+        # This is the regular web app flow
+        else:
             time_start = datetime.datetime.now()
 
-            # This is a normal HTTP request
+            # Http request (other option is websockets)
             if event.get('httpMethod', None):
-                script_name = ''
-                is_elb_context = False
-                headers = merge_headers(event)
-                if event.get('requestContext', None) and event['requestContext'].get('elb', None):
-                    # Related: https://github.com/Miserlou/Zappa/issues/1715
-                    # inputs/outputs for lambda loadbalancer
-                    # https://docs.aws.amazon.com/elasticloadbalancing/latest/application/lambda-functions.html
-                    is_elb_context = True
-                    # host is lower-case when forwarded from ELB
-                    host = headers.get('host')
-                    # TODO: pathParameters is a first-class citizen in apigateway but not available without
-                    # some parsing work for ELB (is this parameter used for anything?)
-                    event['pathParameters'] = ''
+                if self.http_mode == 'asgi':
+                    session = self.session
+                    if not session:
+                        session = boto3.session.Session()
+                    server = ZappaASGIServer(self.http_app, session.region_name)
+                    response = server.handle(event, context)
                 else:
-                    if headers:
-                        host = headers.get('Host')
-                    else:
-                        host = None
-                    logger.debug('host found: [{}]'.format(host))
+                    response = self.handle_http_wsgi(event, context)
+            # Websockets
+            elif event.get('requestContext', None) and event['requestContext'].get('connectionId', None):
+                if not self.websockets_app:
+                    logger.warning('Received a websocket connection but no valid asgi app is found')
+                    response = {'statusCode': 403}
+                else:
+                    session = self.session
+                    if not session:
+                        session = boto3.session.Session()
+                    server = ZappaASGIServer(self.websockets_app, session.region_name)
+                    response = server.handle(event, context)
+            else:
+                raise ValueError('Unexpected event')
 
-                    if host:
-                        if 'amazonaws.com' in host:
-                            logger.debug('amazonaws found in host')
-                            # The path provided in th event doesn't include the
-                            # stage, so we must tell Flask to include the API
-                            # stage in the url it calculates. See https://github.com/Miserlou/Zappa/issues/1014
-                            script_name = '/' + settings.API_STAGE
-                    else:
-                        # This is a test request sent from the AWS console
-                        if settings.DOMAIN:
-                            # Assume the requests received will be on the specified
-                            # domain. No special handling is required
-                            pass
-                        else:
-                            # Assume the requests received will be to the
-                            # amazonaws.com endpoint, so tell Flask to include the
-                            # API stage
-                            script_name = '/' + settings.API_STAGE
+            # Calculate the total response time,
+            # and log it in the Common Log format.
+            time_end = datetime.datetime.now()
+            delta = time_end - time_start
+            response_time_ms = delta.total_seconds() * 1000
+            # response.content = response.data
+            common_log(event, response, response_time=response_time_ms)
 
-                base_path = getattr(settings, 'BASE_PATH', None)
+            return response
 
-                # Create the environment for WSGI and handle the request
-                environ = create_wsgi_request(
-                    event,
-                    script_name=script_name,
-                    base_path=base_path,
-                    trailing_slash=self.trailing_slash,
-                    binary_support=settings.BINARY_SUPPORT,
-                    context_header_mappings=settings.CONTEXT_HEADER_MAPPINGS
-                )
+    def handle_http_wsgi(self, event, context):
+        settings = self.settings
 
-                # We are always on https on Lambda, so tell our wsgi app that.
-                environ['HTTPS'] = 'on'
-                environ['wsgi.url_scheme'] = 'https'
-                environ['lambda.context'] = context
-                environ['lambda.event'] = event
+        headers = merge_headers(event)
+        is_elb_context = False
+        script_name = ''
+        if event.get('requestContext', None) and event['requestContext'].get('elb', None):
+            # Related: https://github.com/Miserlou/Zappa/issues/1715
+            # inputs/outputs for lambda loadbalancer
+            # https://docs.aws.amazon.com/elasticloadbalancing/latest/application/lambda-functions.html
+            is_elb_context = True
+            # host is lower-case when forwarded from ELB
+            host = headers.get('host')
+            # TODO: pathParameters is a first-class citizen in apigateway but not available without
+            # some parsing work for ELB (is this parameter used for anything?)
+            event['pathParameters'] = ''
+        else:
+            if headers:
+                host = headers.get('Host')
+            else:
+                host = None
+            logger.debug('host found: [{}]'.format(host))
 
-                # Execute the application
-                with Response.from_app(self.wsgi_app, environ) as response:
-                    # This is the object we're going to return.
-                    # Pack the WSGI response into our special dictionary.
-                    zappa_returndict = dict()
+            if host:
+                if 'amazonaws.com' in host:
+                    logger.debug('amazonaws found in host')
+                    # The path provided in th event doesn't include the
+                    # stage, so we must tell Flask to include the API
+                    # stage in the url it calculates. See https://github.com/Miserlou/Zappa/issues/1014
+                    script_name = '/' + settings.API_STAGE
+            else:
+                # This is a test request sent from the AWS console
+                if settings.DOMAIN:
+                    # Assume the requests received will be on the specified
+                    # domain. No special handling is required
+                    pass
+                else:
+                    # Assume the requests received will be to the
+                    # amazonaws.com endpoint, so tell Flask to include the
+                    # API stage
+                    script_name = '/' + settings.API_STAGE
 
-                    # Issue #1715: ALB support. ALB responses must always include
-                    # base64 encoding and status description
-                    if is_elb_context:
-                        zappa_returndict.setdefault('isBase64Encoded', False)
-                        zappa_returndict.setdefault('statusDescription', response.status)
+        base_path = getattr(settings, 'BASE_PATH', None)
 
-                    if response.data:
-                        if settings.BINARY_SUPPORT:
-                            if not response.mimetype.startswith("text/") \
+        # Create the environment for WSGI and handle the request
+        environ = create_wsgi_request(
+            event,
+            script_name=script_name,
+            base_path=base_path,
+            trailing_slash=self.trailing_slash,
+            binary_support=settings.BINARY_SUPPORT,
+            context_header_mappings=settings.CONTEXT_HEADER_MAPPINGS
+        )
+
+        # We are always on https on Lambda, so tell our wsgi app that.
+        environ['HTTPS'] = 'on'
+        environ['wsgi.url_scheme'] = 'https'
+        environ['lambda.context'] = context
+        environ['lambda.event'] = event
+
+        try:
+            # Execute the application
+            with Response.from_app(self.http_app, environ) as response:
+                # This is the object we're going to return.
+                # Pack the WSGI response into our special dictionary.
+                zappa_returndict = dict()
+
+                # Issue #1715: ALB support. ALB responses must always include
+                # base64 encoding and status description
+                if is_elb_context:
+                    zappa_returndict.setdefault('isBase64Encoded', False)
+                    zappa_returndict.setdefault('statusDescription', response.status)
+
+                if response.data:
+                    if settings.BINARY_SUPPORT:
+                        if not response.mimetype.startswith("text/") \
                                 or response.mimetype != "application/json":
-                                    zappa_returndict['body'] = base64.b64encode(response.data).decode('utf-8')
-                                    zappa_returndict["isBase64Encoded"] = True
-                            else:
-                                zappa_returndict['body'] = response.data
+                            zappa_returndict['body'] = base64.b64encode(response.data).decode('utf-8')
+                            zappa_returndict["isBase64Encoded"] = True
                         else:
-                            zappa_returndict['body'] = response.get_data(as_text=True)
+                            zappa_returndict['body'] = response.data
+                    else:
+                        zappa_returndict['body'] = response.get_data(as_text=True)
 
-                    zappa_returndict['statusCode'] = response.status_code
-                    if 'headers' in event:
-                        zappa_returndict['headers'] = {}
-                        for key, value in response.headers:
-                            zappa_returndict['headers'][key] = value
-                    if 'multiValueHeaders' in event:
-                        zappa_returndict['multiValueHeaders'] = {}
-                        for key, value in response.headers:
-                            zappa_returndict['multiValueHeaders'][key] = response.headers.getlist(key)
+                zappa_returndict['statusCode'] = response.status_code
+                if 'headers' in event:
+                    zappa_returndict['headers'] = {}
+                    for key, value in response.headers:
+                        zappa_returndict['headers'][key] = value
+                if 'multiValueHeaders' in event:
+                    zappa_returndict['multiValueHeaders'] = {}
+                    for key, value in response.headers:
+                        zappa_returndict['multiValueHeaders'][key] = response.headers.getlist(key)
 
-                    # Calculate the total response time,
-                    # and log it in the Common Log format.
-                    time_end = datetime.datetime.now()
-                    delta = time_end - time_start
-                    response_time_ms = delta.total_seconds() * 1000
-                    response.content = response.data
-                    common_log(environ, response, response_time=response_time_ms)
-
-                    return zappa_returndict
+                return zappa_returndict
         except Exception as e:  # pragma: no cover
             # Print statements are visible in the logs either way
             print(e)
@@ -583,11 +641,8 @@ class LambdaHandler(object):
                        'You can investigate this with the `zappa tail` command.')
 
             # If we didn't even build an app_module, just raise.
-            if not settings.DJANGO_SETTINGS:
-                try:
-                    self.app_module
-                except NameError as ne:
-                    message = 'Failed to import module: {}'.format(ne.message)
+            if not settings.DJANGO_SETTINGS and not self.app_module and not self.asgi_app_module:
+                message = 'Failed to import module'
 
             # Call exception handler for unhandled exceptions
             exception_handler = self.settings.EXCEPTION_HANDLER
@@ -599,7 +654,8 @@ class LambdaHandler(object):
             content['statusCode'] = 500
             body = {'message': message}
             if settings.DEBUG:  # only include traceback if debug is on.
-                body['traceback'] = traceback.format_exception(*exc_info)  # traceback as a list for readability.
+                body['traceback'] = traceback.format_exception(
+                    *exc_info)  # traceback as a list for readability.
             content['body'] = json.dumps(str(body), sort_keys=True, indent=4)
             return content
 

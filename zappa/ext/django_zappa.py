@@ -1,8 +1,4 @@
 import os
-import sys
-
-# add the Lambda root path into the sys.path
-sys.path.append('/var/task')
 
 
 def get_django_wsgi(settings_module):
@@ -18,3 +14,14 @@ def get_django_wsgi(settings_module):
         django.setup()
 
     return get_wsgi_application()
+
+def get_django_asgi(settings_module):
+    from channels.routing import get_default_application
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", settings_module)
+
+    import django
+
+    # Always do django.setup because it is NOT called in get_default_application
+    django.setup()
+
+    return get_default_application()
