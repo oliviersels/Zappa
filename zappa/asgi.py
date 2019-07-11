@@ -424,11 +424,8 @@ class AbortingReceive:
         if self.abort and self.queue.empty():
             raise AbortedReceiveException()
 
-        try:
-            self.receive_task = asyncio.ensure_future(self.queue.get())
-            return await self.receive_task
-        except asyncio.CancelledError:
-            return await self.receive()  # Should trigger the abort exception
+        self.receive_task = asyncio.ensure_future(self.queue.get())
+        return await self.receive_task
 
     def abort_when_empty(self):
         self.abort = True
@@ -488,20 +485,45 @@ class ZappaASGIServer:
         self.response = AwsResponse()
 
     def handle(self, event, context):
-        self.loop = asyncio.get_event_loop()
-        if 'httpMethod' in event:
-            protocol = HttpProtocol(self)
-        elif 'requestContext' in event and 'connectionId' in event['requestContext']:
-            protocol = WebsocketProtocol(self)
-        else:
-            raise ValueError('Can\'t handle event')
-
-        protocol.handle(event, context)
+        self.loop = asyncio.new_event_loop()
         try:
-            self.loop.run_until_complete(self.application_task)
-        except AbortedReceiveException:
-            # The application has tried to receive data which isn't there. Continue as normal.
-            pass
+            asyncio.set_event_loop(self.loop)
+            if 'httpMethod' in event:
+                protocol = HttpProtocol(self)
+            elif 'requestContext' in event and 'connectionId' in event['requestContext']:
+                protocol = WebsocketProtocol(self)
+            else:
+                raise ValueError('Can\'t handle event')
+
+            protocol.handle(event, context)
+            try:
+                self.loop.run_until_complete(self.application_task)
+            except AbortedReceiveException:
+                # The application has tried to receive data which isn't there. Continue as normal.
+                pass
+        finally:
+            try:
+                # Cancel all tasks
+                running_tasks = [task for task in asyncio.Task.all_tasks(self.loop) if not task.done()]
+                if running_tasks:
+                    for task in running_tasks:
+                        task.cancel()
+                    self.loop.run_until_complete(
+                        asyncio.gather(*running_tasks, loop=self.loop, return_exceptions=True)
+                    )
+
+                for task in running_tasks:
+                    if task.cancelled():
+                        continue
+                    if task.exception() is not None:
+                        self.loop.call_exception_handler({
+                            'message': 'unhandled exception during loop shutdown',
+                            'exception': task.exception(),
+                            'task': task
+                        })
+            finally:
+                asyncio.set_event_loop(None)
+                self.loop.close()
 
         if not self.response.status:
             self.response.status = 200
