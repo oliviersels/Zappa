@@ -343,12 +343,14 @@ class WebsocketProtocol:
             )
 
         async def send_message(self, body, binary):
+            logger.debug('Sending message to client: %s', body)
             response = await sync_to_async(requests.post)(
                 self.get_connections_url(),
                 auth=self.get_connections_auth(),
                 data=body,
                 timeout=1)
             response.raise_for_status()
+            logger.debug('Message to client sent!')
 
 
 class HttpProtocol:
@@ -419,17 +421,24 @@ class AbortingReceive:
         self.queue = asyncio.Queue()
         self.abort = False
         self.receive_task = None
+        self.cancel_because_abort = False
 
     async def receive(self):
         if self.abort and self.queue.empty():
             raise AbortedReceiveException()
 
         self.receive_task = asyncio.ensure_future(self.queue.get())
-        return await self.receive_task
+        try:
+            return await self.receive_task
+        except asyncio.CancelledError as e:
+            if self.cancel_because_abort:
+                raise AbortedReceiveException() from e
+            raise
 
     def abort_when_empty(self):
         self.abort = True
         if self.receive_task:
+            self.cancel_because_abort = True
             self.receive_task.cancel()
 
 
