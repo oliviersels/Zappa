@@ -158,8 +158,8 @@ class WebsocketProtocol:
         elif event_type == 'DISCONNECT':
             aborting_receive = self.server.create_application(self, {})
             self.resume_application(aborting_receive.queue)
-            aborting_receive.queue.put_nowait({"type": "websocket.disconnect"})
             # AWS gateway does not pass the disconnect code.
+            aborting_receive.queue.put_nowait({"type": "websocket.disconnect", "code": 0})
             # aborting_receive.queue.put_nowait({"type": "websocket.disconnect", "code": code})
             aborting_receive.abort_when_empty()
 
