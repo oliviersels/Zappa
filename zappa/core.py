@@ -2206,7 +2206,7 @@ class Zappa(object):
         disconnect_route = troposphere.apigatewayv2.Route('DisconnectRoute')
         disconnect_route.ApiId = troposphere.Ref(ws_api)
         disconnect_route.RouteKey = '$disconnect'
-        disconnect_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(connect_integration)])
+        disconnect_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(disconnect_integration)])
 
         # Default integration
         default_integration = troposphere.apigatewayv2.Integration('DefaultIntegration')
@@ -2223,11 +2223,12 @@ class Zappa(object):
         default_route = troposphere.apigatewayv2.Route('DefaultRoute')
         default_route.ApiId = troposphere.Ref(ws_api)
         default_route.RouteKey = '$default'
-        default_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(connect_integration)])
+        default_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(default_integration)])
 
         # The deployment
         ws_deployment = troposphere.apigatewayv2.Deployment('WebsocketDeployment')
         ws_deployment.ApiId = troposphere.Ref(ws_api)
+        ws_deployment.DependsOn = [connect_route, default_route, disconnect_route]
 
         # The stage
         ws_stage = troposphere.apigatewayv2.Stage('WebsocketStage')
