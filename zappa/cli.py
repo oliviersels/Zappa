@@ -2082,12 +2082,15 @@ class ZappaCLI(object):
         else:
             self.project_name = self.get_project_name()
 
-        # The name of the actual AWS Lambda function, ex, 'helloworld-dev'
-        # Assume that we already have have validated the name beforehand.
-        # Related:  https://github.com/Miserlou/Zappa/pull/664
-        #           https://github.com/Miserlou/Zappa/issues/678
-        #           And various others from Slack.
-        self.lambda_name = slugify.slugify(self.project_name + '-' + self.api_stage)
+        if 'lambda_name' in self.stage_config:
+            self.lambda_name = self.stage_config['lambda_name']
+        else:
+            # The name of the actual AWS Lambda function, ex, 'helloworld-dev'
+            # Assume that we already have have validated the name beforehand.
+            # Related:  https://github.com/Miserlou/Zappa/pull/664
+            #           https://github.com/Miserlou/Zappa/issues/678
+            #           And various others from Slack.
+            self.lambda_name = slugify.slugify(self.project_name + '-' + self.api_stage)
 
         # Load stage-specific settings
         self.s3_bucket_name = self.stage_config.get('s3_bucket', "zappa-" + ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(9)))
