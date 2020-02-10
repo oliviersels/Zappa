@@ -526,7 +526,8 @@ class LambdaHandler(object):
                     server = ZappaASGIServer(self.websockets_app, session.region_name)
                     response = server.handle(event, context)
             else:
-                raise ValueError('Unexpected event')
+                logger.error('Unexpected event')
+                return
 
             # Calculate the total response time,
             # and log it in the Common Log format.

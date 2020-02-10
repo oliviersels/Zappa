@@ -1,5 +1,25 @@
 import unittest
 from unittest.mock import patch, Mock, MagicMock
+try:
+    from unittest.mock import AsyncMock
+except ImportError:
+    # Taken from asyncmock
+    class AsyncMock(MagicMock):
+        def __init__(_mock_self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            _mock_self.aenter_return_value = _mock_self
+
+        def __call__(_mock_self, *args, **kwargs):
+            async def wrapper():
+                _mock_self._mock_check_sig(*args, **kwargs)
+                return _mock_self._mock_call(*args, **kwargs)
+            return wrapper()
+
+        async def __aenter__(_mock_self):
+            return _mock_self.aenter_return_value
+
+        async def __aexit__(_mock_self, exc_type, exc_val, exc_tb):
+            pass
 
 from zappa.asgi import ZappaASGIServer, MemoryApplicationInstanceBackend, WebsocketProtocol
 
@@ -60,10 +80,9 @@ class SuspendableAcceptSend:
 
 class TestASGIServer(unittest.TestCase):
     def test_legacy_consumer_accept_send_and_echo(self):
-        application_instance_backend = MemoryApplicationInstanceBackend()
+        ZappaASGIServer.application_instance_backend = MemoryApplicationInstanceBackend()
         server1 = ZappaASGIServer(
             AsgiAdapter(legacy_consumer_accept_send),
-            application_instance_backend=application_instance_backend
         )
         response = server1.handle({
             "headers": {
@@ -139,10 +158,9 @@ class TestASGIServer(unittest.TestCase):
         # Second request. New server and app. Same MemoryBackend.
         server2 = ZappaASGIServer(
             AsgiAdapter(legacy_consumer_accept_send),
-            application_instance_backend=application_instance_backend
         )
-        send_handler = WebsocketProtocol.SendHandler(server2.response, None, None, None, None, None, None)
-        send_handler.handle_send = MagicMock()
+        send_handler = WebsocketProtocol.SendHandler(server2.response, None, None, None, None, None)
+        send_handler.handle_send = AsyncMock()
         with patch.object(WebsocketProtocol, 'get_send_handler', return_value=send_handler) as method_mock:
             response = server2.handle({
                 "requestContext": {
