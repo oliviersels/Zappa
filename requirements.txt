@@ -20,3 +20,5 @@ troposphere>=1.9.0
 Werkzeug>=0.14
 wheel>=0.30.0
 wsgi-request-logger>=0.4.6
+aws-requests-auth~=0.4.2
+asgiref~=3.1.4

@@ -34,6 +34,8 @@ import boto3
 import botocore
 import troposphere
 import troposphere.apigateway
+import troposphere.apigatewayv2
+import troposphere.awslambda
 from botocore.exceptions import ClientError
 from lambda_packages import lambda_packages as lambda_packages_orig
 from tqdm import tqdm
@@ -165,6 +167,13 @@ ATTACH_POLICY = """{
                 "route53:*"
             ],
             "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "execute-api:*"
+            ],
+            "Resource": "arn:aws:execute-api:*:*:*"
         }
     ]
 }"""
@@ -2121,7 +2130,7 @@ class Zappa(object):
 
         auth_type = "NONE"
         if iam_authorization and authorizer:
-            logger.warn("Both IAM Authorization and Authorizer are specified, this is not possible. "
+            logger.warning("Both IAM Authorization and Authorizer are specified, this is not possible. "
                         "Setting Auth method to IAM Authorization")
             authorizer = None
             auth_type = "AWS_IAM"
@@ -2132,7 +2141,7 @@ class Zappa(object):
 
         # build a fresh template
         self.cf_template = troposphere.Template()
-        self.cf_template.add_description('Automatically generated with Zappa')
+        self.cf_template.set_description('Automatically generated with Zappa')
         self.cf_api_resources = []
         self.cf_parameters = {}
 
@@ -2147,6 +2156,96 @@ class Zappa(object):
                                             endpoint_configuration=endpoint_configuration
                                         )
         return self.cf_template
+
+    def add_websocket_resources(self,
+                                lambda_arn,
+                                stage_name,
+                                api_name=None,
+                                description=None):
+        template = self.cf_template
+
+        # The top level API
+        ws_api = troposphere.apigatewayv2.Api('ApiWebsockets')
+        ws_api.Name = api_name or lambda_arn.split(':')[-1] + '-ws'
+        if not description:
+            description = 'Created automatically by Zappa.'
+        ws_api.Description = description
+        ws_api.ProtocolType = 'WEBSOCKET'
+        ws_api.RouteSelectionExpression = '*'  # Is this a correct selection expression?
+
+        # The API proxy routes and integrations
+        # Connect integration
+        connect_integration = troposphere.apigatewayv2.Integration('ConnectIntegration')
+        connect_integration.ApiId = troposphere.Ref(ws_api)
+        connect_integration.Description = 'PROXY @connect route'
+        connect_integration.IntegrationType = 'AWS_PROXY'
+        connect_integration.IntegrationUri = 'arn:aws:apigateway:{region}:lambda:' \
+                                             'path/2015-03-31/functions/{lambda_arn}/invocations'.format(
+            region=self.aws_region,
+            lambda_arn=lambda_arn
+        )
+
+        # Connect route
+        connect_route = troposphere.apigatewayv2.Route('ConnectRoute')
+        connect_route.ApiId = troposphere.Ref(ws_api)
+        connect_route.RouteKey = '$connect'
+        connect_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(connect_integration)])
+
+        # Disconnect integration
+        disconnect_integration = troposphere.apigatewayv2.Integration('DisconnectIntegration')
+        disconnect_integration.ApiId = troposphere.Ref(ws_api)
+        disconnect_integration.Description = 'PROXY @disconnect route'
+        disconnect_integration.IntegrationType = 'AWS_PROXY'
+        disconnect_integration.IntegrationUri = 'arn:aws:apigateway:{region}:lambda:' \
+                                                'path/2015-03-31/functions/{lambda_arn}/invocations'.format(
+            region=self.aws_region,
+            lambda_arn=lambda_arn
+        )
+
+        # Disconnect route
+        disconnect_route = troposphere.apigatewayv2.Route('DisconnectRoute')
+        disconnect_route.ApiId = troposphere.Ref(ws_api)
+        disconnect_route.RouteKey = '$disconnect'
+        disconnect_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(disconnect_integration)])
+
+        # Default integration
+        default_integration = troposphere.apigatewayv2.Integration('DefaultIntegration')
+        default_integration.ApiId = troposphere.Ref(ws_api)
+        default_integration.Description = 'PROXY @default route'
+        default_integration.IntegrationType = 'AWS_PROXY'
+        default_integration.IntegrationUri = 'arn:aws:apigateway:{region}:lambda:' \
+                                                'path/2015-03-31/functions/{lambda_arn}/invocations'.format(
+            region=self.aws_region,
+            lambda_arn=lambda_arn
+        )
+
+        # Default route
+        default_route = troposphere.apigatewayv2.Route('DefaultRoute')
+        default_route.ApiId = troposphere.Ref(ws_api)
+        default_route.RouteKey = '$default'
+        default_route.Target = troposphere.Join('/', ['integrations', troposphere.Ref(default_integration)])
+
+        # The deployment
+        ws_deployment = troposphere.apigatewayv2.Deployment('WebsocketDeployment')
+        ws_deployment.ApiId = troposphere.Ref(ws_api)
+        ws_deployment.DependsOn = [connect_route, default_route, disconnect_route]
+
+        # The stage
+        ws_stage = troposphere.apigatewayv2.Stage('WebsocketStage')
+        ws_stage.ApiId = troposphere.Ref(ws_api)
+        ws_stage.DeploymentId = troposphere.Ref(ws_deployment)
+        ws_stage.StageName = stage_name
+
+        # Add the resources to the template
+        self.cf_template.add_resource(ws_api)
+        self.cf_template.add_resource(connect_integration)
+        self.cf_template.add_resource(connect_route)
+        self.cf_template.add_resource(disconnect_integration)
+        self.cf_template.add_resource(disconnect_route)
+        self.cf_template.add_resource(default_integration)
+        self.cf_template.add_resource(default_route)
+        self.cf_template.add_resource(ws_deployment)
+        self.cf_template.add_resource(ws_stage)
 
     def update_stack(self, name, working_bucket, wait=False, update_only=False, disable_progress=False):
         """
@@ -2618,20 +2717,28 @@ class Zappa(object):
     # CloudWatch Events
     ##
 
-    def create_event_permission(self, lambda_name, principal, source_arn):
+    def create_event_permission(self, lambda_name, principal, source_arn=None):
         """
         Create permissions to link to an event.
 
         Related: http://docs.aws.amazon.com/lambda/latest/dg/with-s3-example-configure-event-source.html
         """
         logger.debug('Adding new permission to invoke Lambda function: {}'.format(lambda_name))
-        permission_response = self.lambda_client.add_permission(
-            FunctionName=lambda_name,
-            StatementId=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8)),
-            Action='lambda:InvokeFunction',
-            Principal=principal,
-            SourceArn=source_arn,
-        )
+        if source_arn:
+            permission_response = self.lambda_client.add_permission(
+                FunctionName=lambda_name,
+                StatementId=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8)),
+                Action='lambda:InvokeFunction',
+                Principal=principal,
+                SourceArn=source_arn,
+            )
+        else:
+            permission_response = self.lambda_client.add_permission(
+                FunctionName=lambda_name,
+                StatementId=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8)),
+                Action='lambda:InvokeFunction',
+                Principal=principal,
+            )
 
         if permission_response['ResponseMetadata']['HTTPStatusCode'] != 201:
             print('Problem creating permission to invoke Lambda function')

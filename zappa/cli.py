@@ -663,22 +663,26 @@ class ZappaCLI(object):
                                             authorizer=self.authorizer,
                                             cors_options=self.cors,
                                             description=self.apigateway_description,
-                                            policy=self.apigateway_policy,
                                             endpoint_configuration=self.endpoint_configuration
                                         )
+        if self.use_apigateway_websockets:
+            self.zappa.add_websocket_resources(lambda_arn=lambda_arn,
+                                               stage_name=self.api_stage,
+                                               api_name=self.lambda_name + '-ws',
+                                               description=self.apigateway_description
+                                               )
 
-        if not output:
-            template_file = self.lambda_name + '-template-' + str(int(time.time())) + '.json'
-        else:
-            template_file = output
-        with open(template_file, 'wb') as out:
-            out.write(bytes(template.to_json(indent=None, separators=(',',':')), "utf-8"))
-
+        template_json = template.to_json()
         if not json:
+            if not output:
+                template_file = self.lambda_name + '-template-' + str(int(time.time())) + '.json'
+            else:
+                template_file = output
+            with open(template_file, 'w') as out:
+                out.write(template_json)
             click.echo(click.style("Template created", fg="green", bold=True) + ": " + click.style(template_file, bold=True))
         else:
-            with open(template_file, 'r') as out:
-                print(out.read())
+            print(template_json)
 
     def deploy(self, source_zip=None):
         """
@@ -809,7 +813,11 @@ class ZappaCLI(object):
                                                         description=self.apigateway_description,
                                                         endpoint_configuration=self.endpoint_configuration
                                                     )
-
+            if self.use_apigateway_websockets:
+                self.zappa.add_websocket_resources(lambda_arn=self.lambda_arn,
+                                                   stage_name=self.api_stage,
+                                                   api_name=self.lambda_name + '-ws',
+                                                   description=self.apigateway_description)
             self.zappa.update_stack(
                                     self.lambda_name,
                                     self.s3_bucket_name,
@@ -990,7 +998,12 @@ class ZappaCLI(object):
                                             description=self.apigateway_description,
                                             endpoint_configuration=self.endpoint_configuration
                                         )
-            self.zappa.update_stack(
+            if self.use_apigateway_websockets:
+                self.zappa.add_websocket_resources(lambda_arn=self.lambda_arn,
+                                                   stage_name=self.api_stage,
+                                                   api_name=self.lambda_name + '-ws',
+                                                   description=self.apigateway_description)
+                self.zappa.update_stack(
                                     self.lambda_name,
                                     self.s3_bucket_name,
                                     wait=True,
@@ -1023,6 +1036,21 @@ class ZappaCLI(object):
             endpoint_url = None
 
         self.schedule()
+
+        if False:
+            # Add permission for api gateway to invoke the lambda function in case of websockets connection
+            # TODO: Better condition
+            permission_response = self.zappa.lambda_client.add_permission(
+                FunctionName=self.lambda_name,
+                StatementId=''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8)),
+                Action='lambda:InvokeFunction',
+                Principal='apigateway.amazonaws.com',
+                SourceArn='arn:aws:*:*:*:*',
+            )
+
+            if permission_response['ResponseMetadata']['HTTPStatusCode'] != 201:
+                print('Problem creating permission to invoke Lambda function')
+                return None  # XXX: Raise?
 
         # Update any cognito pool with the lambda arn
         # do this after schedule as schedule clears the lambda policy and we need to add one
@@ -1194,6 +1222,12 @@ class ZappaCLI(object):
                 lambda_name=self.lambda_name,
                 events=events
             )
+
+        # Add permission for lambda
+        self.zappa.create_event_permission(
+            lambda_name=self.lambda_name,
+            principal='apigateway.amazonaws.com'
+        )
 
         # Add async tasks SNS
         if self.stage_config.get('async_source', None) == 'sns' \
@@ -2048,18 +2082,24 @@ class ZappaCLI(object):
         else:
             self.project_name = self.get_project_name()
 
-        # The name of the actual AWS Lambda function, ex, 'helloworld-dev'
-        # Assume that we already have have validated the name beforehand.
-        # Related:  https://github.com/Miserlou/Zappa/pull/664
-        #           https://github.com/Miserlou/Zappa/issues/678
-        #           And various others from Slack.
-        self.lambda_name = slugify.slugify(self.project_name + '-' + self.api_stage)
+        if 'lambda_name' in self.stage_config:
+            self.lambda_name = self.stage_config['lambda_name']
+        else:
+            # The name of the actual AWS Lambda function, ex, 'helloworld-dev'
+            # Assume that we already have have validated the name beforehand.
+            # Related:  https://github.com/Miserlou/Zappa/pull/664
+            #           https://github.com/Miserlou/Zappa/issues/678
+            #           And various others from Slack.
+            self.lambda_name = slugify.slugify(self.project_name + '-' + self.api_stage)
 
         # Load stage-specific settings
         self.s3_bucket_name = self.stage_config.get('s3_bucket', "zappa-" + ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(9)))
         self.vpc_config = self.stage_config.get('vpc_config', {})
         self.memory_size = self.stage_config.get('memory_size', 512)
         self.app_function = self.stage_config.get('app_function', None)
+        self.asgi_app_function = self.stage_config.get('asgi_app_function', None)
+        self.asgi_mode = self.stage_config.get('asgi_mode', None)
+        self.asgi_app_backend = self.stage_config.get('asgi_app_backend', None)
         self.exception_handler = self.stage_config.get('exception_handler', None)
         self.aws_region = self.stage_config.get('aws_region', None)
         self.debug = self.stage_config.get('debug', True)
@@ -2086,6 +2126,7 @@ class ZappaCLI(object):
         self.use_apigateway = self.stage_config.get('use_apigateway', True)
         if self.use_apigateway:
             self.use_apigateway = self.stage_config.get('apigateway_enabled', True)
+        self.use_apigateway_websockets = self.use_apigateway and self.stage_config.get('apigateway_websockets_enabled', True)
         self.apigateway_description = self.stage_config.get('apigateway_description', None)
 
         self.lambda_handler = self.stage_config.get('lambda_handler', 'handler.lambda_handler')
@@ -2308,6 +2349,25 @@ class ZappaCLI(object):
                         " It needs to be in the format `" + click.style("your_module.your_app_object", bold=True) + "`.")
                 app_module, app_function = self.app_function.rsplit('.', 1)
                 settings_s = settings_s + "APP_MODULE='{0!s}'\nAPP_FUNCTION='{1!s}'\n".format(app_module, app_function)
+
+            if self.asgi_app_function:
+                if '.' not in self.asgi_app_function:
+                    raise ClickException("Your " + click.style("asgi_app_function", fg='red', bold=True) +
+                                         " value is not a modular path. It needs to be in the format `" +
+                                         click.style("your_module.your_app_object", bold=True) + "`.")
+                asgi_app_module, asgi_app_function = self.asgi_app_function.rsplit('.', 1)
+                settings_s = settings_s + "ASGI_APP_MODULE='{0!s}'\nASGI_APP_FUNCTION='{1!s}'\n".format(asgi_app_module, asgi_app_function)
+            if self.asgi_mode:
+                if self.asgi_mode not in ['websockets', 'full']:
+                    raise ClickException("Your " + click.style("asgi_mode", fg='red', bold=True) +
+                                         " value should be one of " + click.style("[websockets, full]", bold=True))
+                settings_s += "ASGI_MODE='{0!s}'\n".format(self.asgi_mode)
+            elif self.asgi_app_function:
+                settings_s += "APP_MODE='websockets'\n"
+            if self.asgi_app_backend:
+                settings_s += "ASGI_APP_BACKEND='{0!s}'\n".format(self.asgi_app_backend)
+            else:
+                settings_s += "ASGI_APP_BACKEND=None"
 
             if self.exception_handler:
                 settings_s += "EXCEPTION_HANDLER='{0!s}'\n".format(self.exception_handler)
