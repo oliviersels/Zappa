@@ -18,14 +18,17 @@ from werkzeug.wrappers import Response
 
 # This file may be copied into a project's root,
 # so handle both scenarios.
+
 try:
     from zappa.middleware import ZappaWSGIMiddleware
     from zappa.utilities import DEFAULT_TEXT_MIMETYPES, merge_headers, parse_s3_url
     from zappa.wsgi import common_log, create_wsgi_request
+    from zappa.websockets import WebsocketHandler
 except ImportError:  # pragma: no cover
     from .middleware import ZappaWSGIMiddleware
     from .utilities import DEFAULT_TEXT_MIMETYPES, merge_headers, parse_s3_url
     from .wsgi import common_log, create_wsgi_request
+    from .websockets import WebsocketHandler
 
 
 # Set up logging
@@ -49,6 +52,7 @@ class LambdaHandler:
     # Application
     app_module = None
     wsgi_app = None
+    websockets_app = None
     trailing_slash = False
 
     def __new__(cls, settings_name="zappa_settings", session=None):
@@ -113,6 +117,12 @@ class LambdaHandler:
                             print("Failed to find library: {}...right filename?".format(library))
                 except ImportError:
                     print("Failed to import cytpes library")
+
+            # Load websocket app if available
+            if hasattr(self.settings, "WS_APP_MODULE"):
+                logger.debug("Loading Websocket App Module: %s", self.settings.WS_APP_MODULE)
+                self.websockets_app_module = importlib.import_module(self.settings.WS_APP_MODULE)
+                self.websockets_app = getattr(self.websockets_app_module, self.settings.WS_APP_FUNCTION)
 
             # This is a non-WSGI application
             # https://github.com/Miserlou/Zappa/pull/748
@@ -517,6 +527,16 @@ class LambdaHandler:
                 logger.error("Cannot find a function to process the triggered event.")
             return result
 
+        # Websocket request
+        elif event.get('requestContext', {}).get('connectionId', None):
+            logger.debug('Received websocket event')
+            if not self.websockets_app:
+                logger.warning("Received a websocket connection but no valid websocket app is found")
+                return {'statusCode': 403}
+            else:
+                ws_handler = WebsocketHandler(self.websockets_app)
+                return ws_handler.handle(event, context)
+
         # This is an HTTP-protocol API Gateway event or Lambda url event with payload format version 2.0
         elif "version" in event and event["version"] == "2.0":
             try:
@@ -630,6 +650,13 @@ class LambdaHandler:
                 return content
 
         # Normal web app flow
+        else:
+            # This is a normal HTTP request
+            return self.handle_http_wsgi(event, context)
+
+    def handle_http_wsgi(self, event, context):
+        settings = self.settings
+
         try:
             # Timing
             time_start = datetime.datetime.now()

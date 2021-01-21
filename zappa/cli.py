@@ -94,6 +94,7 @@ class ZappaCLI:
     # Specific settings
     api_stage = None
     app_function = None
+    ws_app_function = None
     aws_region = None
     debug = None
     prebuild_script = None
@@ -2249,6 +2250,7 @@ class ZappaCLI:
             raise ClickException("Please provide a valid ephemeral_storage size between 512 - 10240 in your Zappa settings.")
 
         self.app_function = self.stage_config.get("app_function", None)
+        self.ws_app_function = self.stage_config.get("ws_app_function", None)
         self.exception_handler = self.stage_config.get("exception_handler", None)
         self.aws_region = self.stage_config.get("aws_region", None)
         self.debug = self.stage_config.get("debug", True)
@@ -2353,6 +2355,13 @@ class ZappaCLI:
                     + click.style("file and not a function", bold=True)
                     + "! It should probably be something like 'my_file.app', not 'my_file.py'!"
                 )
+
+        if self.ws_app_function:
+            self.collision_warning(self.ws_app_function)
+            if self.ws_app_function[-3:] == ".py":
+                click.echo(click.style("Warning!", fg="red", bold=True) +
+                           " Your ws_app_function is pointing to a " + click.style("file and not a function", bold=True) +
+                           "! It should probably be something like 'my_file.app', not 'my_file.py'!")
 
         return self.zappa
 
@@ -2516,6 +2525,19 @@ class ZappaCLI:
                 )
             app_module, app_function = self.app_function.rsplit(".", 1)
             settings_s = settings_s + "APP_MODULE='{0!s}'\nAPP_FUNCTION='{1!s}'\n".format(app_module, app_function)
+
+        if self.ws_app_function:
+            if "." not in self.ws_app_function:  # pragma: no cover
+                raise ClickException(
+                    "Your "
+                    + click.style("ws_app_function", fg="red", bold=True)
+                    + " value is not a modular path."
+                    + " It needs to be in the format `"
+                    + click.style("your_module.your_ws_app_object", bold=True)
+                    + "`."
+                )
+            ws_app_module, ws_app_function = self.ws_app_function.rsplit(".", 1)
+            settings_s = settings_s + "WS_APP_MODULE='{0!s}'\nWS_APP_FUNCTION='{1!s}'\n".format(ws_app_module, ws_app_function)
 
         if self.exception_handler:
             settings_s += "EXCEPTION_HANDLER='{0!s}'\n".format(self.exception_handler)
