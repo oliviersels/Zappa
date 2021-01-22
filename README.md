@@ -958,6 +958,7 @@ to change Zappa's behavior. Use these at your own risk!
             "SubnetIds": [ "subnet-12345678" ], // Note: not all availability zones support Lambda!
             "SecurityGroupIds": [ "sg-12345678" ]
         },
+        "ws_app_function": "your_module.ws_app", // The websocket app function (if configured)
         "xray_tracing": false // Optional, enable AWS X-Ray tracing on your lambda function.
     }
 }
