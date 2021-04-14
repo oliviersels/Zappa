@@ -126,7 +126,7 @@ class TestWebsockets(unittest.TestCase):
         }, {})
 
         self.assertDictEqual(response, {
-            'statusCode': 0,
+            'statusCode': 200,
             'body': '',
         })
         ws_instance_spy.websocket_receive.assert_called_once()
