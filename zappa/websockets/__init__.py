@@ -4,7 +4,7 @@ import urllib.parse
 from base64 import b64decode
 
 import boto3
-
+import botocore.exceptions
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,10 @@ class SendHandler:
             raise ValueError('Event is not valid: unknown type. Should be conform the ASGI Websocket spec.')
 
     def _close(self, code):
-        self.client.delete_connection(ConnectionId=self.connection_id)
+        try:
+            self.client.delete_connection(ConnectionId=self.connection_id)
+        except self.client.exceptions.GoneException:
+            pass  # Ignore GoneExceptions, can't close a connection when there is no client anymore.
 
     def _send_to_client(self, data):
         self.client.post_to_connection(
