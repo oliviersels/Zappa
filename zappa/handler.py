@@ -117,12 +117,6 @@ class LambdaHandler:
                 except ImportError:
                     print ("Failed to import cytpes library")
 
-            # Load websocket app if available
-            if hasattr(self.settings, 'WS_APP_MODULE'):
-                logger.debug('Loading Websocket App Module: %s', self.settings.WS_APP_MODULE)
-                self.websockets_app_module = importlib.import_module(self.settings.WS_APP_MODULE)
-                self.websockets_app = getattr(self.websockets_app_module, self.settings.WS_APP_FUNCTION)
-
             # This is a non-WSGI application
             # https://github.com/Miserlou/Zappa/pull/748
             if not hasattr(self.settings, 'APP_MODULE') and not self.settings.DJANGO_SETTINGS:
@@ -157,6 +151,12 @@ class LambdaHandler:
                 self.trailing_slash = True
 
             self.wsgi_app = ZappaWSGIMiddleware(wsgi_app_function)
+
+            # Load websocket app if available
+            if hasattr(self.settings, 'WS_APP_MODULE'):
+                logger.debug('Loading Websocket App Module: %s', self.settings.WS_APP_MODULE)
+                self.websockets_app_module = importlib.import_module(self.settings.WS_APP_MODULE)
+                self.websockets_app = getattr(self.websockets_app_module, self.settings.WS_APP_FUNCTION)
 
     def load_remote_project_archive(self, project_zip_path):
         """
