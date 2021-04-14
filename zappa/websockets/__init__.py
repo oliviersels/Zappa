@@ -73,12 +73,14 @@ class WebsocketHandler:
             app_instance = self.app(send_handler, scope)
             app_instance.websocket_connect({'type': 'websocket.connect'})
         elif event_type == 'MESSAGE':
+            send_handler.response.status = 200
             app_instance = self.app(send_handler, None)
             if event['isBase64Encoded']:
                 app_instance.websocket_receive({'type': 'websocket.receive', 'bytes': b64decode(event['body'])})
             else:
                 app_instance.websocket_receive({'type': 'websocket.receive', 'text': event['body']})
         elif event_type == 'DISCONNECT':
+            send_handler.response.status = 200
             app_instance = self.app(send_handler, None)
             app_instance.websocket_disconnect({'type': 'websocket.disconnect', 'code': 1000})  # TODO: Get from event?
         else:
@@ -182,6 +184,7 @@ class SendHandler:
         elif event['type'] == 'websocket.close':
             code = event.get('code', 1000)
             self._close(code)
+            self.response.status = 403
         else:
             raise ValueError('Event is not valid: unknown type. Should be conform the ASGI Websocket spec.')
 
