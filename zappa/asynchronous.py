@@ -368,7 +368,7 @@ def route_lambda_task(event, context):
     imports the function, calls the function with args
     """
     message = event
-    return run_message(message)
+    return run_message(message, event, context)
 
 
 def route_sns_task(event, context):
@@ -378,7 +378,7 @@ def route_sns_task(event, context):
     """
     record = event["Records"][0]
     message = json.loads(record["Sns"]["Message"])
-    return run_message(message)
+    return run_message(message, event, context)
 
 
 def route_sqs_task(event, context):
@@ -402,7 +402,7 @@ def route_sqs_task(event, context):
     return run_message(message)
 
 
-def run_message(message):
+def run_message(message, event, context):
     """
     Runs a function defined by a message object with keys:
     'task_path', 'args', and 'kwargs' used by lambda routing
@@ -421,9 +421,21 @@ def run_message(message):
 
     func = import_and_get_task(message["task_path"])
     if hasattr(func, "sync"):
-        response = func.sync(*message["args"], **message["kwargs"])
-    else:
-        response = func(*message["args"], **message["kwargs"])
+        func = func.sync
+
+
+    func_args = message["args"]
+    func_kwargs = message["kwargs"]
+    args, varargs, varkw, defaults, kwonlyargs, _, _ = inspect.getfullargspec(func)
+    if (args and "event" in args) or varkw or (kwonlyargs and "event" in kwonlyargs):
+        func_kwargs.setdefault("event", event)
+    if (args and "context" in args) or varkw or (kwonlyargs and "context" in kwonlyargs):
+        func_kwargs.setdefault("context", context)
+
+    response = func(
+        *func_args,
+        **func_kwargs
+    )
 
     if message.get("capture_response", False):
         DYNAMODB_CLIENT.update_item(
