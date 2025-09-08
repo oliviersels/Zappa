@@ -142,5 +142,10 @@
        "delete_local_zip": true,
        "binary_support": true,
        "additional_text_mimetypes": ["application/custommimetype"]
+    },
+    "schedule_async_resources_sqs": {
+      "keep_warm": false,
+      "async_source": "sqs",
+      "async_resources": true
     }
 }
