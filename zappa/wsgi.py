@@ -121,7 +121,7 @@ def create_wsgi_request(event_info,
             'SERVER_PROTOCOL': str('HTTP/1.1'),
             'wsgi.version': (1, 0),
             'wsgi.url_scheme': headers.get('X-Forwarded-Proto', 'http'),
-            'wsgi.input': body,
+            'wsgi.input': six.BytesIO(body),
             'wsgi.errors': sys.stderr,
             'wsgi.multiprocess': False,
             'wsgi.multithread': False,
@@ -133,8 +133,6 @@ def create_wsgi_request(event_info,
             if 'Content-Type' in headers:
                 environ['CONTENT_TYPE'] = headers['Content-Type']
 
-            # This must be Bytes or None
-            environ['wsgi.input'] = six.BytesIO(body)
             if body:
                 environ['CONTENT_LENGTH'] = str(len(body))
             else:
